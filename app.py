@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 import streamlit as st
@@ -7,40 +8,59 @@ import numpy as np
 from deepface import DeepFace
 
 
-# =========================
-# PAGE SETTINGS
-# =========================
+# UTF-8 output
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
+
+# Streamlit page
 st.set_page_config(
     page_title="AI Face Analysis",
-    page_icon="🤖",
-    layout="centered"
+    page_icon="🤖"
 )
 
 st.title("🤖 AI Face Analysis")
 st.write("Upload a photo or take a picture using your camera.")
 
 
-# =========================
+# --------------------------------------------------
 # MODEL PATHS
-# =========================
+# --------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
 
-FACE_PROTO = str(MODELS_DIR / "opencv_face_detector.pbtxt")
-FACE_MODEL = str(MODELS_DIR / "opencv_face_detector_uint8.pb")
+FACE_PROTO = str(
+    MODELS_DIR / "opencv_face_detector.pbtxt"
+)
 
-AGE_PROTO = str(MODELS_DIR / "age_deploy.prototxt")
-AGE_MODEL = str(MODELS_DIR / "age_net.caffemodel")
+FACE_MODEL = str(
+    MODELS_DIR / "opencv_face_detector_uint8.pb"
+)
 
-GENDER_PROTO = str(MODELS_DIR / "gender_deploy.prototxt")
-GENDER_MODEL = str(MODELS_DIR / "gender_net.caffemodel")
+AGE_PROTO = str(
+    MODELS_DIR / "age_deploy.prototxt"
+)
+
+AGE_MODEL = str(
+    MODELS_DIR / "age_net.caffemodel"
+)
+
+GENDER_PROTO = str(
+    MODELS_DIR / "gender_deploy.prototxt"
+)
+
+GENDER_MODEL = str(
+    MODELS_DIR / "gender_net.caffemodel"
+)
 
 
-# =========================
-# LABELS
-# =========================
+# --------------------------------------------------
+# AGE / GENDER SETTINGS
+# --------------------------------------------------
 
 AGE_LIST = [
     "(0-2)",
@@ -65,117 +85,112 @@ MODEL_MEAN_VALUES = (
 )
 
 
-# =========================
-# CONFIDENCE SETTINGS
-# =========================
-
-FACE_CONFIDENCE = 0.75
-GENDER_MIN_CONFIDENCE = 70.0
-AGE_MIN_CONFIDENCE = 70.0
-
-
-# =========================
+# --------------------------------------------------
 # LOAD MODELS
-# =========================
+# --------------------------------------------------
 
 @st.cache_resource
 def load_models():
 
     required_files = [
-        FACE_MODEL,
-        FACE_PROTO,
-        AGE_MODEL,
-        AGE_PROTO,
-        GENDER_MODEL,
-        GENDER_PROTO
+        (FACE_MODEL, "opencv_face_detector_uint8.pb"),
+        (FACE_PROTO, "opencv_face_detector.pbtxt"),
+        (AGE_MODEL, "age_net.caffemodel"),
+        (AGE_PROTO, "age_deploy.prototxt"),
+        (GENDER_MODEL, "gender_net.caffemodel"),
+        (GENDER_PROTO, "gender_deploy.prototxt"),
     ]
 
-    for file_path in required_files:
+    # Check model files
+    missing = []
 
-        if not os.path.exists(file_path):
+    for path, name in required_files:
+        if not os.path.isfile(path):
+            missing.append(name)
 
-            st.error(
-                f"Model file missing:\n\n{file_path}"
-            )
-
-            st.stop()
+    if missing:
+        st.error(
+            "❌ Missing model file(s): "
+            + ", ".join(missing)
+        )
+        st.stop()
 
     try:
 
-        face_net = cv2.dnn.readNet(
+        # Face detection model
+        face_net = cv2.dnn.readNetFromTensorflow(
             FACE_MODEL,
             FACE_PROTO
         )
 
-        age_net = cv2.dnn.readNet(
-            AGE_MODEL,
-            AGE_PROTO
+        # Age model
+        age_net = cv2.dnn.readNetFromCaffe(
+            AGE_PROTO,
+            AGE_MODEL
         )
 
-        gender_net = cv2.dnn.readNet(
-            GENDER_MODEL,
-            GENDER_PROTO
+        # Gender model
+        gender_net = cv2.dnn.readNetFromCaffe(
+            GENDER_PROTO,
+            GENDER_MODEL
         )
 
         return face_net, age_net, gender_net
 
     except Exception as e:
 
-        st.error(
-            "❌ Unable to load AI models."
-        )
-
+        st.error("❌ Model loading failed")
         st.code(str(e))
-
         st.stop()
 
 
+# Load models
 face_net, age_net, gender_net = load_models()
 
 
-# =========================
-# IMAGE INPUT
-# =========================
+# --------------------------------------------------
+# CAMERA / IMAGE UPLOAD
+# --------------------------------------------------
 
-camera_image = st.camera_input(
+camera = st.camera_input(
     "Take a picture"
 )
 
-uploaded_image = st.file_uploader(
+uploaded = st.file_uploader(
     "Or upload an image",
     type=["jpg", "jpeg", "png"]
 )
 
 
+# Select image source
 source = (
-    camera_image
-    if camera_image is not None
-    else uploaded_image
+    camera
+    if camera is not None
+    else uploaded
 )
 
 
-# =========================
-# PROCESS IMAGE
-# =========================
+# --------------------------------------------------
+# IMAGE PROCESSING
+# --------------------------------------------------
 
 if source is not None:
 
-    image_bytes = source.getvalue()
-
-    image_array = np.frombuffer(
-        image_bytes,
+    data = np.asarray(
+        bytearray(source.getvalue()),
         dtype=np.uint8
     )
 
     frame = cv2.imdecode(
-        image_array,
+        data,
         cv2.IMREAD_COLOR
     )
 
     if frame is None:
 
         st.error(
-            "❌ Could not read the image."
+            "❌ Could not read image file. "
+            "Please upload a valid image."
         )
 
         st.stop()
@@ -184,9 +199,9 @@ if source is not None:
     height, width = frame.shape[:2]
 
 
-    # =========================
+    # --------------------------------------------------
     # FACE DETECTION
-    # =========================
+    # --------------------------------------------------
 
     blob = cv2.dnn.blobFromImage(
         frame,
@@ -202,36 +217,49 @@ if source is not None:
     detections = face_net.forward()
 
 
-    detected_faces = []
+    face_found = False
 
 
-    for i in range(detections.shape[2]):
+    # --------------------------------------------------
+    # PROCESS DETECTED FACE
+    # --------------------------------------------------
 
-        confidence = float(
-            detections[0, 0, i, 2]
-        )
+    for i in range(
+        detections.shape[2]
+    ):
 
-        if confidence < FACE_CONFIDENCE:
+        confidence = detections[
+            0, 0, i, 2
+        ]
+
+
+        if confidence < 0.75:
             continue
 
 
+        # Face coordinates
         x1 = int(
-            detections[0, 0, i, 3] * width
+            detections[0, 0, i, 3]
+            * width
         )
 
         y1 = int(
-            detections[0, 0, i, 4] * height
+            detections[0, 0, i, 4]
+            * height
         )
 
         x2 = int(
-            detections[0, 0, i, 5] * width
+            detections[0, 0, i, 5]
+            * width
         )
 
         y2 = int(
-            detections[0, 0, i, 6] * height
+            detections[0, 0, i, 6]
+            * height
         )
 
 
+        # Keep coordinates inside image
         x1 = max(0, x1)
         y1 = max(0, y1)
 
@@ -239,10 +267,7 @@ if source is not None:
         y2 = min(height, y2)
 
 
-        if x2 <= x1 or y2 <= y1:
-            continue
-
-
+        # Crop face
         face = frame[
             y1:y2,
             x1:x2
@@ -253,279 +278,280 @@ if source is not None:
             continue
 
 
-        detected_faces.append(
-            (x1, y1, x2, y2, face)
+        face_found = True
+
+
+        # --------------------------------------------------
+        # FACE BLOB
+        # --------------------------------------------------
+
+        face_blob = cv2.dnn.blobFromImage(
+            face,
+            1.0,
+            (227, 227),
+            MODEL_MEAN_VALUES,
+            swapRB=False
         )
 
 
-    # =========================
-    # NO FACE
-    # =========================
+        # --------------------------------------------------
+        # GENDER
+        # --------------------------------------------------
 
-    if len(detected_faces) == 0:
-
-        st.warning(
-            "⚠️ No clear face detected. "
-            "Please try a clearer photo with better lighting."
+        gender_net.setInput(
+            face_blob
         )
 
-        st.stop()
-
-
-    # =========================
-    # PROCESS FIRST FACE
-    # =========================
-
-    x1, y1, x2, y2, face = detected_faces[0]
-
-
-    # =========================
-    # GENDER
-    # =========================
-
-    face_blob = cv2.dnn.blobFromImage(
-        face,
-        1.0,
-        (227, 227),
-        MODEL_MEAN_VALUES,
-        swapRB=False
-    )
-
-
-    gender_net.setInput(face_blob)
-
-    gender_prediction = gender_net.forward()[0]
-
-    gender_index = int(
-        np.argmax(gender_prediction)
-    )
-
-    gender_confidence = float(
-        gender_prediction[gender_index] * 100
-    )
-
-
-    if gender_confidence >= GENDER_MIN_CONFIDENCE:
-
-        gender = GENDER_LIST[gender_index]
-
-    else:
-
-        gender = "Uncertain"
-
-
-    # =========================
-    # AGE
-    # =========================
-
-    age_net.setInput(face_blob)
-
-    age_prediction = age_net.forward()[0]
-
-    age_index = int(
-        np.argmax(age_prediction)
-    )
-
-    age_confidence = float(
-        age_prediction[age_index] * 100
-    )
-
-
-    if age_confidence >= AGE_MIN_CONFIDENCE:
-
-        age = AGE_LIST[age_index]
-
-    else:
-
-        age = "Uncertain"
-
-
-    # =========================
-    # EXPRESSION
-    # =========================
-
-    expression = "Unknown"
-    expression_confidence = 0.0
-
-
-    try:
-
-        result = DeepFace.analyze(
-            img_path=face,
-            actions=["emotion"],
-            enforce_detection=False,
-            detector_backend="skip",
-            silent=True
+        gender_prediction = (
+            gender_net.forward()[0]
         )
 
-
-        if isinstance(result, list):
-
-            result = result[0]
-
-
-        emotions = result.get(
-            "emotion",
-            {}
-        )
-
-
-        if emotions:
-
-            expression = max(
-                emotions,
-                key=emotions.get
+        gender_index = int(
+            np.argmax(
+                gender_prediction
             )
+        )
 
-            expression_confidence = float(
-                emotions[expression]
+        gender = GENDER_LIST[
+            gender_index
+        ]
+
+        gender_confidence = float(
+            gender_prediction[
+                gender_index
+            ] * 100
+        )
+
+
+        # --------------------------------------------------
+        # AGE
+        # --------------------------------------------------
+
+        age_net.setInput(
+            face_blob
+        )
+
+        age_prediction = (
+            age_net.forward()[0]
+        )
+
+        age_index = int(
+            np.argmax(
+                age_prediction
             )
+        )
+
+        age = AGE_LIST[
+            age_index
+        ]
+
+        age_confidence = float(
+            age_prediction[
+                age_index
+            ] * 100
+        )
 
 
-    except Exception:
+        # --------------------------------------------------
+        # EXPRESSION
+        # --------------------------------------------------
 
         expression = "Unknown"
         expression_confidence = 0.0
 
 
-    # =========================
-    # DRAW FACE BOX
-    # =========================
+        try:
 
-    cv2.rectangle(
-        frame,
-        (x1, y1),
-        (x2, y2),
-        (0, 255, 0),
-        2
-    )
+            result = DeepFace.analyze(
+                img_path=face,
+                actions=["emotion"],
+                enforce_detection=False,
+                detector_backend="skip",
+                silent=True
+            )
 
 
-    # =========================
-    # DISPLAY LABELS
-    # =========================
+            if isinstance(
+                result,
+                list
+            ):
 
-    cv2.putText(
-        frame,
-        "Gender: " + gender,
-        (x1, max(30, y1 - 65)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (0, 255, 0),
-        2
-    )
+                result = result[0]
 
 
-    cv2.putText(
-        frame,
-        "Age: " + age,
-        (x1, max(55, y1 - 35)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (0, 255, 0),
-        2
-    )
+            emotions = result.get(
+                "emotion",
+                {}
+            )
 
 
-    cv2.putText(
-        frame,
-        "Expression: " + expression,
-        (x1, min(height - 10, y2 + 30)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (0, 255, 0),
-        2
-    )
+            if emotions:
+
+                expression = max(
+                    emotions,
+                    key=emotions.get
+                )
+
+                expression_confidence = float(
+                    emotions[
+                        expression
+                    ]
+                )
 
 
-    # =========================
-    # SHOW IMAGE
-    # =========================
+        except Exception:
 
-    frame_rgb = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2RGB
-    )
+            expression = "Unknown"
+
+            expression_confidence = 0.0
 
 
-    st.image(
-        frame_rgb,
-        caption="AI Face Analysis",
-        use_container_width=True
-    )
+        # --------------------------------------------------
+        # DRAW FACE BOX
+        # --------------------------------------------------
+
+        cv2.rectangle(
+            frame,
+            (x1, y1),
+            (x2, y2),
+            (0, 255, 0),
+            2
+        )
 
 
-    # =========================
-    # RESULTS
-    # =========================
+        # Gender text
+        cv2.putText(
+            frame,
+            "Gender: " + gender,
+            (
+                x1,
+                max(
+                    30,
+                    y1 - 60
+                )
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2
+        )
 
-    st.subheader(
-        "Analysis Result"
-    )
+
+        # Age text
+        cv2.putText(
+            frame,
+            "Age: " + age,
+            (
+                x1,
+                max(
+                    55,
+                    y1 - 30
+                )
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2
+        )
 
 
-    col1, col2, col3 = st.columns(3)
+        # Expression text
+        cv2.putText(
+            frame,
+            "Expression: "
+            + expression,
+            (
+                x1,
+                min(
+                    height - 10,
+                    y2 + 30
+                )
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2
+        )
 
 
-    with col1:
+        # Only process first face
+        break
 
-        st.metric(
+
+    # --------------------------------------------------
+    # DISPLAY RESULT
+    # --------------------------------------------------
+
+    if face_found:
+
+        frame_rgb = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2RGB
+        )
+
+
+        st.image(
+            frame_rgb,
+            caption="AI Face Analysis",
+            use_container_width=True
+        )
+
+
+        st.subheader(
+            "Analysis Result"
+        )
+
+
+        col1, col2, col3 = st.columns(3)
+
+
+        col1.metric(
             "Gender",
             gender
         )
 
 
-    with col2:
-
-        st.metric(
+        col2.metric(
             "Age",
             age
         )
 
 
-    with col3:
-
-        st.metric(
+        col3.metric(
             "Expression",
             expression
         )
 
 
-    # =========================
-    # CONFIDENCE
-    # =========================
+        st.write(
+            f"**Gender Confidence:** "
+            f"{gender_confidence:.1f}%"
+        )
 
-    st.write(
-        f"**Gender Confidence:** "
-        f"{gender_confidence:.1f}%"
-    )
-
-
-    st.write(
-        f"**Age Confidence:** "
-        f"{age_confidence:.1f}%"
-    )
-
-
-    if expression != "Unknown":
 
         st.write(
-            f"**Expression Confidence:** "
-            f"{expression_confidence:.1f}%"
+            f"**Age Confidence:** "
+            f"{age_confidence:.1f}%"
         )
+
+
+        if expression != "Unknown":
+
+            st.write(
+                f"**Expression Confidence:** "
+                f"{expression_confidence:.1f}%"
+            )
+
+        else:
+
+            st.write(
+                "**Expression Confidence:** N/A"
+            )
+
 
     else:
 
-        st.write(
-            "**Expression Confidence:** N/A"
+        st.warning(
+            "⚠️ No clear face detected. "
+            "Please try again with better lighting."
         )
-
-
-    # =========================
-    # INFORMATION
-    # =========================
-
-    st.info(
-        "Note: Age, gender and expression predictions "
-        "are AI estimates and may not always be accurate."
-    )

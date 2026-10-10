@@ -1,1008 +1,317 @@
-import os
-import urllib.request
 
 import cv2
 import numpy as np
 import streamlit as st
+from PIL import Image, ImageOps
 from deepface import DeepFace
 
-
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-
-st.set_page_config(
-    page_title="AI Face Analysis",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-
-# ============================================================
-# CUSTOM CSS
-# ============================================================
+st.set_page_config(page_title="AI Face Analysis", page_icon="🤖", layout="wide")
 
 st.markdown(
     """
-    <style>
-
-    .main {
-        padding-top: 1rem;
-    }
-
-    .hero {
-        padding: 28px;
-        border-radius: 20px;
-        text-align: center;
-        margin-bottom: 25px;
-        background: linear-gradient(
-            135deg,
-            rgba(70,70,90,0.35),
-            rgba(20,20,30,0.55)
-        );
-        border: 1px solid rgba(255,255,255,0.08);
-    }
-
-    .hero h1 {
-        font-size: 42px;
-        margin-bottom: 8px;
-    }
-
-    .hero p {
-        font-size: 17px;
-        opacity: 0.75;
-        margin-bottom: 0;
-    }
-
-    .result-card {
-        padding: 22px;
-        border-radius: 18px;
-        text-align: center;
-        min-height: 135px;
-        background: rgba(80,80,100,0.18);
-        border: 1px solid rgba(255,255,255,0.08);
-        margin-bottom: 15px;
-    }
-
-    .result-card .icon {
-        font-size: 30px;
-    }
-
-    .result-card .title {
-        font-size: 14px;
-        opacity: 0.7;
-        margin-top: 8px;
-    }
-
-    .result-card .value {
-        font-size: 25px;
-        font-weight: 700;
-        margin-top: 5px;
-    }
-
-    .section-title {
-        font-size: 25px;
-        font-weight: 700;
-        margin-top: 28px;
-        margin-bottom: 15px;
-    }
-
-    .confidence-card {
-        padding: 18px;
-        border-radius: 15px;
-        background: rgba(80,80,100,0.14);
-        border: 1px solid rgba(255,255,255,0.07);
-    }
-
-    .emotion-row {
-        padding: 8px 12px;
-        border-radius: 10px;
-        margin-bottom: 5px;
-    }
-
-    .footer {
-        text-align: center;
-        opacity: 0.55;
-        margin-top: 45px;
-        padding: 20px;
-    }
-
-    </style>
+    <h1 style="text-align:center;">🤖 AI Face Analysis System</h1>
+    <p style="text-align:center;color:#999;">
+        Face Detection • Approximate Age • Gender-category Estimate • Expression
+    </p>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
-
-
-# ============================================================
-# MODEL DIRECTORY
-# ============================================================
-
-MODEL_DIR = "models"
-os.makedirs(MODEL_DIR, exist_ok=True)
-
-
-# ============================================================
-# MODEL FILES
-# ============================================================
-
-MODEL_URLS = {
-    "opencv_face_detector.pbtxt":
-        "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/opencv_face_detector.pbtxt",
-
-    "opencv_face_detector_uint8.pb":
-        "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/opencv_face_detector_uint8.pb",
-
-    "age_deploy.prototxt":
-        "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/age_deploy.prototxt",
-
-    "age_net.caffemodel":
-        "https://raw.githubusercontent.com/eveningglow/age-and-gender-classification/5b60d9f8a8608cdbbcdaaa39bf28f351e8d8553b/model/age_net.caffemodel",
-
-    "gender_deploy.prototxt":
-        "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/gender_deploy.prototxt",
-
-    "gender_net.caffemodel":
-        "https://raw.githubusercontent.com/eveningglow/age-and-gender-classification/master/model/gender_net.caffemodel"
-}
-
-
-# ============================================================
-# DOWNLOAD MODEL
-# ============================================================
-
-def download_model(filename, url):
-
-    path = os.path.join(MODEL_DIR, filename)
-
-    if os.path.exists(path) and os.path.getsize(path) > 1000:
-        return path
-
-    try:
-
-        with st.spinner(f"Downloading {filename}..."):
-
-            urllib.request.urlretrieve(
-                url,
-                path
-            )
-
-        if os.path.getsize(path) <= 1000:
-            raise RuntimeError(
-                f"Downloaded model is too small: {filename}"
-            )
-
-        return path
-
-    except Exception as e:
-
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-
-        raise RuntimeError(
-            f"Could not download {filename}: {e}"
-        )
-
-
-# ============================================================
-# LOAD MODELS
-# ============================================================
-
-@st.cache_resource(show_spinner=False)
-def load_models():
-
-    face_proto = download_model(
-        "opencv_face_detector.pbtxt",
-        MODEL_URLS["opencv_face_detector.pbtxt"]
-    )
-
-    face_model = download_model(
-        "opencv_face_detector_uint8.pb",
-        MODEL_URLS["opencv_face_detector_uint8.pb"]
-    )
-
-    age_proto = download_model(
-        "age_deploy.prototxt",
-        MODEL_URLS["age_deploy.prototxt"]
-    )
-
-    age_model = download_model(
-        "age_net.caffemodel",
-        MODEL_URLS["age_net.caffemodel"]
-    )
-
-    gender_proto = download_model(
-        "gender_deploy.prototxt",
-        MODEL_URLS["gender_deploy.prototxt"]
-    )
-
-    gender_model = download_model(
-        "gender_net.caffemodel",
-        MODEL_URLS["gender_net.caffemodel"]
-    )
-
-    face_net = cv2.dnn.readNet(
-        face_model,
-        face_proto
-    )
-
-    age_net = cv2.dnn.readNet(
-        age_model,
-        age_proto
-    )
-
-    gender_net = cv2.dnn.readNet(
-        gender_model,
-        gender_proto
-    )
-
-    return face_net, age_net, gender_net
-
-
-# ============================================================
-# AGE / GENDER CLASSES
-# ============================================================
-
-AGE_LIST = [
-    "(0-2)",
-    "(4-6)",
-    "(8-12)",
-    "(15-20)",
-    "(25-32)",
-    "(38-43)",
-    "(48-53)",
-    "(60-100)"
-]
-
-GENDER_LIST = [
-    "Male",
-    "Female"
-]
-
-MODEL_MEAN_VALUES = (
-    78.4263377603,
-    87.7689143744,
-    114.895847746
-)
-
-
-# ============================================================
-# FACE DETECTION
-# ============================================================
-
-def detect_faces(frame, face_net):
-
-    h, w = frame.shape[:2]
-
-    blob = cv2.dnn.blobFromImage(
-        frame,
-        1.0,
-        (300, 300),
-        [104, 117, 123],
-        swapRB=False,
-        crop=False
-    )
-
-    face_net.setInput(blob)
-
-    detections = face_net.forward()
-
-    faces = []
-
-    for i in range(detections.shape[2]):
-
-        confidence = float(
-            detections[0, 0, i, 2]
-        )
-
-        if confidence < 0.50:
-            continue
-
-        box = (
-            detections[0, 0, i, 3:7]
-            * np.array([w, h, w, h])
-        )
-
-        x1, y1, x2, y2 = box.astype(int)
-
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(w, x2)
-        y2 = min(h, y2)
-
-        if x2 <= x1 or y2 <= y1:
-            continue
-
-        faces.append(
-            {
-                "x": x1,
-                "y": y1,
-                "x2": x2,
-                "y2": y2,
-                "confidence": confidence
-            }
-        )
-
-    faces.sort(
-        key=lambda item:
-        (item["x2"] - item["x"])
-        *
-        (item["y2"] - item["y"]),
-        reverse=True
-    )
-
-    return faces
-
-
-# ============================================================
-# AGE + GENDER
-# ============================================================
-
-def predict_age_gender(face, age_net, gender_net):
-
-    blob = cv2.dnn.blobFromImage(
-        face,
-        1.0,
-        (227, 227),
-        MODEL_MEAN_VALUES,
-        swapRB=False
-    )
-
-    gender_net.setInput(blob)
-
-    gender_predictions = gender_net.forward()
-
-    gender_index = int(
-        gender_predictions[0].argmax()
-    )
-
-    gender = GENDER_LIST[gender_index]
-
-    gender_confidence = float(
-        gender_predictions[0][gender_index] * 100
-    )
-
-    age_net.setInput(blob)
-
-    age_predictions = age_net.forward()
-
-    age_index = int(
-        age_predictions[0].argmax()
-    )
-
-    age_range = AGE_LIST[age_index]
-
-    age_confidence = float(
-        age_predictions[0][age_index] * 100
-    )
-
-    return (
-        gender,
-        gender_confidence,
-        age_range,
-        age_confidence
-    )
-
-
-# ============================================================
-# EMOTION
-# ============================================================
-
-def predict_emotion(face):
-
-    try:
-
-        result = DeepFace.analyze(
-            img_path=face,
-            actions=["emotion"],
-            detector_backend="skip",
-            enforce_detection=False,
-            align=True,
-            silent=True
-        )
-
-        if isinstance(result, list):
-            result = result[0]
-
-        emotions = result.get(
-            "emotion",
-            {}
-        )
-
-        dominant_emotion = result.get(
-            "dominant_emotion",
-            "Unknown"
-        )
-
-        confidence = float(
-            emotions.get(
-                dominant_emotion,
-                0.0
-            )
-        )
-
-        return (
-            dominant_emotion,
-            confidence,
-            emotions
-        )
-
-    except Exception:
-        return (
-            "Unknown",
-            0.0,
-            {}
-        )
-
-
-# ============================================================
-# HERO
-# ============================================================
-
-st.markdown(
-    """
-    <div class="hero">
-        <h1>🤖 AI Face Analysis</h1>
-        <p>
-            AI-powered Face, Age, Gender and Expression Analysis
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# ============================================================
-# SIDEBAR
-# ============================================================
 
 with st.sidebar:
-
     st.header("⚙️ Settings")
-
-    input_method = st.radio(
-        "Choose image source:",
-        [
-            "📷 Camera",
-            "🖼️ Upload Image"
-        ]
-    )
-
+    input_method = st.radio("Choose image source:", ["📷 Camera", "🖼️ Upload Image"])
     st.divider()
-
-    st.markdown("### 📌 Features")
-
+    st.subheader("📌 Features")
     st.write("👤 Face Detection")
-    st.write("🎂 Age Estimation")
-    st.write("⚧ Gender Estimation")
-    st.write("😊 Expression Analysis")
-    st.write("📊 Confidence Analysis")
-
-    st.divider()
-
+    st.write("🎂 Approximate Age Estimation")
+    st.write("⚧️ Gender-category Estimate")
+    st.write("😊 Facial Expression Estimate")
     st.info(
-        "AI predictions are estimates. "
-        "Results may vary depending on lighting, "
-        "image quality and face angle."
+        "Predictions are estimates, not verified facts. Model scores are not "
+        "real-world accuracy rates, and these predictions can be wrong."
     )
-
-
-# ============================================================
-# IMAGE INPUT
-# ============================================================
-
-source = None
 
 if input_method == "📷 Camera":
-
-    source = st.camera_input(
-        "📷 Take a picture"
-    )
-
+    source = st.camera_input("Take a picture")
 else:
-
-    source = st.file_uploader(
-        "🖼️ Upload an image",
-        type=[
-            "jpg",
-            "jpeg",
-            "png"
-        ]
-    )
+    source = st.file_uploader("Upload a clear face photo", type=["jpg", "jpeg", "png"])
 
 
-# ============================================================
-# ANALYSIS
-# ============================================================
+def as_uint8_face(face):
+    """Convert a DeepFace crop to a valid uint8 BGR array."""
+    arr = np.asarray(face)
+    if arr.size == 0:
+        raise ValueError("Empty face crop")
+    if arr.dtype != np.uint8:
+        arr = arr.astype(np.float32)
+        if np.nanmax(arr) <= 1.0:
+            arr *= 255.0
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError("Face crop is not a 3-channel image")
+    return arr
+
+
+def safe_float(value, default=0.0):
+    try:
+        number = float(value)
+        return number if np.isfinite(number) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def extract_region(face_item, image_width, image_height):
+    area = face_item.get("facial_area") or face_item.get("region") or {}
+    x = int(safe_float(area.get("x", 0)))
+    y = int(safe_float(area.get("y", 0)))
+    w = int(safe_float(area.get("w", area.get("width", 0))))
+    h = int(safe_float(area.get("h", area.get("height", 0))))
+    x1 = max(0, min(image_width - 1, x))
+    y1 = max(0, min(image_height - 1, y))
+    x2 = max(0, min(image_width, x + w))
+    y2 = max(0, min(image_height, y + h))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def as_results(value):
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def gender_label(result):
+    raw = str(result.get("dominant_gender", "Unknown")).strip().lower()
+    if raw in ("man", "male"):
+        return "Male-category estimate"
+    if raw in ("woman", "female"):
+        return "Female-category estimate"
+    return "Unknown"
+
+
+def age_label(result):
+    age = result.get("age")
+    try:
+        age = int(round(float(age)))
+        if age < 0:
+            return "Unavailable"
+        return f"About {age} years (estimate)"
+    except (TypeError, ValueError):
+        return "Unavailable"
+
+
+def score_percent(value):
+    """DeepFace face-confidence is commonly 0..1; score dictionaries use 0..100."""
+    value = safe_float(value, -1.0)
+    if value < 0:
+        return None
+    if value <= 1.0:
+        value *= 100.0
+    return max(0.0, min(100.0, value))
+
 
 if source is not None:
-
-    image_bytes = source.getvalue()
-
-    image_array = np.frombuffer(
-        image_bytes,
-        dtype=np.uint8
-    )
-
-    frame = cv2.imdecode(
-        image_array,
-        cv2.IMREAD_COLOR
-    )
-
-    if frame is None:
-
-        st.error(
-            "❌ Could not read the image."
-        )
-
+    try:
+        pil_img = ImageOps.exif_transpose(Image.open(source)).convert("RGB")
+        rgb_image = np.asarray(pil_img)
+        # DeepFace accepts OpenCV-style BGR NumPy images.
+        bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+    except Exception as err:
+        st.error("Image open panna mudiyala da. JPG/PNG photo try pannu.")
+        st.exception(err)
         st.stop()
 
-    # --------------------------------------------------------
-    # LOAD MODELS
-    # --------------------------------------------------------
+    # Detect faces, then select ONLY the largest face for analysis/display.
+    # This prevents multiple boxes and overlapping labels in group photos.
+    extracted_faces = None
+    chosen_backend = None
+    detector_errors = []
+
+    with st.spinner("🔎 Main face detect pannudhu..."):
+        for backend in ("retinaface", "opencv", "ssd"):
+            try:
+                found = DeepFace.extract_faces(
+                    img_path=bgr_image,
+                    detector_backend=backend,
+                    enforce_detection=True,
+                    align=True,
+                    expand_percentage=0,
+                    grayscale=False,
+                    color_face="bgr",
+                    normalize_face=False,
+                )
+                if found:
+                    extracted_faces = found
+                    chosen_backend = backend
+                    break
+            except Exception as err:
+                detector_errors.append(
+                    f"{backend}: {type(err).__name__}: {err}"
+                )
+
+    if not extracted_faces:
+        st.error(
+            "Face detect panna mudiyala da. Clear-ah, front-facing photo use pannu."
+        )
+        with st.expander("Technical details"):
+            for detail in detector_errors:
+                st.write(detail)
+        st.stop()
+
+    height, width = rgb_image.shape[:2]
+
+    # Select the largest valid face region. Other faces won't be boxed or analyzed.
+    valid_faces = []
+    for extracted in extracted_faces:
+        region = extract_region(extracted, width, height)
+        if region is None:
+            continue
+        x1, y1, x2, y2 = region
+        area = (x2 - x1) * (y2 - y1)
+        valid_faces.append((area, extracted, region))
+
+    if not valid_faces:
+        st.error("Detected face-ku valid area kidaikkala da. Vera photo try pannu.")
+        st.stop()
+
+    valid_faces.sort(key=lambda item: item[0], reverse=True)
+    _, selected_face, (x1, y1, x2, y2) = valid_faces[0]
 
     try:
-
-        with st.spinner(
-            "🤖 Loading AI models..."
-        ):
-
-            (
-                face_net,
-                age_net,
-                gender_net
-            ) = load_models()
-
-    except Exception as e:
-
-        st.error(
-            "❌ AI models could not be loaded."
-        )
-
-        st.code(str(e))
-
+        with st.spinner("🧠 Main face-ah analyze pannudhu..."):
+            face_crop = as_uint8_face(selected_face.get("face"))
+            # The crop is already detected/aligned, so skip a second detection.
+            raw = DeepFace.analyze(
+                img_path=face_crop,
+                actions=["age", "gender", "emotion"],
+                detector_backend="skip",
+                enforce_detection=False,
+                align=False,
+                silent=True,
+            )
+            analyses = as_results(raw)
+            if not analyses:
+                raise RuntimeError("Model returned no analysis result")
+            item = analyses[0]
+    except Exception as err:
+        st.error("Main face analyze panna mudiyala da.")
+        st.exception(err)
         st.stop()
 
-    # --------------------------------------------------------
-    # FACE DETECTION
-    # --------------------------------------------------------
+    gender = gender_label(item)
+    age = age_label(item)
+    emotion = str(item.get("dominant_emotion", "Unknown")).capitalize()
 
-    with st.spinner(
-        "🔍 Detecting face..."
-    ):
+    # Draw ONE rectangle and ONE short label only.
+    marked = bgr_image.copy()
+    cv2.rectangle(marked, (x1, y1), (x2, y2), (0, 220, 90), 3)
 
-        faces = detect_faces(
-            frame,
-            face_net
-        )
+    if gender == "Male-category estimate":
+        short_gender = "Male?"
+    elif gender == "Female-category estimate":
+        short_gender = "Female?"
+    else:
+        short_gender = "Unknown"
 
-    if not faces:
-
-        st.warning(
-            "⚠️ No clear face detected."
-        )
-
-        st.info(
-            "Please use a clear photo with "
-            "the complete face visible."
-        )
-
-        st.stop()
-
-    selected_face = faces[0]
-
-    x1 = selected_face["x"]
-    y1 = selected_face["y"]
-    x2 = selected_face["x2"]
-    y2 = selected_face["y2"]
-
-    detection_confidence = (
-        selected_face["confidence"] * 100
+    short_age = age.replace(" (estimate)", "")
+    label = f"{short_gender} | {short_age} | {emotion}"
+    scale = max(0.45, min(0.72, width / 1400.0))
+    (tw, th), base = cv2.getTextSize(
+        label, cv2.FONT_HERSHEY_SIMPLEX, scale, 2
     )
-
-    # --------------------------------------------------------
-    # CROP FACE
-    # --------------------------------------------------------
-
-    face = frame[
-        y1:y2,
-        x1:x2
-    ]
-
-    if face.size == 0:
-
-        st.error(
-            "❌ Unable to crop detected face."
-        )
-
-        st.stop()
-
-    # --------------------------------------------------------
-    # AGE + GENDER
-    # --------------------------------------------------------
-
-    with st.spinner(
-        "👤 Predicting age and gender..."
-    ):
-
-        (
-            gender,
-            gender_confidence,
-            age_range,
-            age_confidence
-        ) = predict_age_gender(
-            face,
-            age_net,
-            gender_net
-        )
-
-    # --------------------------------------------------------
-    # EXPRESSION
-    # --------------------------------------------------------
-
-    with st.spinner(
-        "😊 Detecting expression..."
-    ):
-
-        (
-            expression,
-            expression_confidence,
-            emotions
-        ) = predict_emotion(face)
-
-    # ========================================================
-    # DRAW RESULT
-    # ========================================================
-
-    result_frame = frame.copy()
-
+    text_y = max(th + 12, y1 - 6)
+    tx2 = min(width - 1, x1 + tw + 10)
     cv2.rectangle(
-        result_frame,
-        (x1, y1),
-        (x2, y2),
-        (0, 255, 0),
-        3
+        marked,
+        (x1, text_y - th - 8),
+        (tx2, text_y + base),
+        (10, 18, 32),
+        -1,
     )
-
-    label = (
-        f"{gender} | Age {age_range} | "
-        f"{expression.capitalize()}"
-    )
-
-    label_y = max(
-        30,
-        y1 - 12
-    )
-
     cv2.putText(
-        result_frame,
+        marked,
         label,
-        (x1, label_y),
+        (x1 + 5, text_y - 3),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (0, 255, 0),
+        scale,
+        (255, 255, 255),
         2,
-        cv2.LINE_AA
+        cv2.LINE_AA,
     )
 
-    result_rgb = cv2.cvtColor(
-        result_frame,
-        cv2.COLOR_BGR2RGB
+    raw_confidence = selected_face.get(
+        "confidence", selected_face.get("face_confidence")
+    )
+    detector_score = (
+        score_percent(raw_confidence)
+        if raw_confidence is not None
+        else None
     )
 
-    # ========================================================
-    # RESULT IMAGE
-    # ========================================================
-
-    st.markdown(
-        '<div class="section-title">🔍 Face Detection Result</div>',
-        unsafe_allow_html=True
+    st.caption(
+        f"Face detector used: {chosen_backend}. "
+        f"Faces found: {len(extracted_faces)}; analyzing the largest face only."
     )
 
+    st.subheader("🔍 Face Detection Result")
     st.image(
-        result_rgb,
-        width="stretch"
+        cv2.cvtColor(marked, cv2.COLOR_BGR2RGB),
+        use_container_width=True,
     )
 
-    # ========================================================
-    # MAIN RESULT CARDS
-    # ========================================================
+    st.subheader("📊 Analysis Result")
+    with st.container(border=True):
+        st.markdown("### 👤 Main Face")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Gender category (estimate)", gender)
+        c2.metric("Approximate age", age)
+        c3.metric("Expression estimate", emotion)
 
-    st.markdown(
-        '<div class="section-title">📊 Analysis Result</div>',
-        unsafe_allow_html=True
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        st.markdown(
-            f"""
-            <div class="result-card">
-                <div class="icon">👤</div>
-                <div class="title">Gender</div>
-                <div class="value">{gender}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    with col2:
-
-        st.markdown(
-            f"""
-            <div class="result-card">
-                <div class="icon">🎂</div>
-                <div class="title">Estimated Age</div>
-                <div class="value">{age_range}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    with col3:
-
-        st.markdown(
-            f"""
-            <div class="result-card">
-                <div class="icon">😊</div>
-                <div class="title">Expression</div>
-                <div class="value">
-                    {expression.capitalize()}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    # ========================================================
-    # MODEL CONFIDENCE
-    # ========================================================
-
-    st.markdown(
-        '<div class="section-title">🎯 Model Confidence</div>',
-        unsafe_allow_html=True
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        st.markdown(
-            '<div class="confidence-card">',
-            unsafe_allow_html=True
-        )
-
-        st.write(
-            f"**👤 Gender:** "
-            f"{gender_confidence:.1f}%"
-        )
-
-        st.progress(
-            min(
-                max(
-                    gender_confidence / 100,
-                    0
-                ),
-                1
-            )
-        )
-
-        st.markdown(
-            '</div>',
-            unsafe_allow_html=True
-        )
-
-    with col2:
-
-        st.markdown(
-            '<div class="confidence-card">',
-            unsafe_allow_html=True
-        )
-
-        st.write(
-            f"**🎂 Age:** "
-            f"{age_confidence:.1f}%"
-        )
-
-        st.progress(
-            min(
-                max(
-                    age_confidence / 100,
-                    0
-                ),
-                1
-            )
-        )
-
-        st.markdown(
-            '</div>',
-            unsafe_allow_html=True
-        )
-
-    with col3:
-
-        st.markdown(
-            '<div class="confidence-card">',
-            unsafe_allow_html=True
-        )
-
-        st.write(
-            f"**😊 Expression:** "
-            f"{expression_confidence:.1f}%"
-        )
-
-        st.progress(
-            min(
-                max(
-                    expression_confidence / 100,
-                    0
-                ),
-                1
-            )
-        )
-
-        st.markdown(
-            '</div>',
-            unsafe_allow_html=True
-        )
-
-    # ========================================================
-    # DETECTION CONFIDENCE
-    # ========================================================
-
-    st.write("")
-
-    st.markdown(
-        f"**🔎 Face Detection Confidence:** "
-        f"{detection_confidence:.1f}%"
-    )
-
-    st.progress(
-        min(
-            max(
-                detection_confidence / 100,
-                0
-            ),
-            1
-        )
-    )
-
-    # ========================================================
-    # EXPRESSION DETAILS
-    # ========================================================
-
-    st.markdown(
-        '<div class="section-title">😊 Expression Details</div>',
-        unsafe_allow_html=True
-    )
-
-    emotion_names = [
-        "angry",
-        "disgust",
-        "fear",
-        "happy",
-        "sad",
-        "surprise",
-        "neutral"
-    ]
-
-    emotion_col1, emotion_col2 = st.columns(2)
-
-    for index, emotion in enumerate(emotion_names):
-
-        value = float(
-            emotions.get(
-                emotion,
-                0.0
-            )
-        )
-
-        current_col = (
-            emotion_col1
-            if index % 2 == 0
-            else emotion_col2
-        )
-
-        with current_col:
-
-            st.markdown(
-                f"""
-                <div class="emotion-row">
-                    <b>{emotion.capitalize()}</b>
-                    — {value:.1f}%
-                </div>
-                """,
-                unsafe_allow_html=True
+        if detector_score is not None:
+            st.caption(
+                f"Face detection score: {detector_score:.1f}% "
+                "(not prediction accuracy)"
             )
 
-            st.progress(
-                min(
-                    max(
-                        value / 100,
-                        0
-                    ),
-                    1
-                )
+        with st.expander("View face crop sent to the analysis model"):
+            st.image(
+                cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB),
+                caption="Selected largest face crop",
+                width=220,
             )
 
-    # ========================================================
-    # DOWNLOAD REPORT
-    # ========================================================
+        gender_scores = item.get("gender", {}) or {}
+        if gender_scores:
+            st.markdown("**Gender-category model scores (not accuracy)**")
+            for name, val in gender_scores.items():
+                st.write(f"{name}: {safe_float(val):.1f}% model score")
 
-    st.markdown(
-        '<div class="section-title">📥 Analysis Report</div>',
-        unsafe_allow_html=True
+        emotion_scores = item.get("emotion", {}) or {}
+        if emotion_scores:
+            st.markdown("**Expression model scores (not verified emotions)**")
+            for name in (
+                "angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"
+            ):
+                if name not in emotion_scores:
+                    continue
+                value = max(0.0, min(100.0, safe_float(emotion_scores[name])))
+                st.write(f"{name.capitalize()}: {value:.1f}% model score")
+                st.progress(int(round(value)))
+
+    st.info(
+        "Only the largest detected face is analyzed. Age, gender-category, and "
+        "expression values are model estimates and may be incorrect, even when "
+        "model scores are high. A detector score measures face detection, not "
+        "prediction accuracy."
     )
-
-    report = f"""
-AI FACE ANALYSIS REPORT
-=======================
-
-Gender: {gender}
-Gender Confidence: {gender_confidence:.1f}%
-
-Estimated Age Range: {age_range}
-Age Confidence: {age_confidence:.1f}%
-
-Expression: {expression.capitalize()}
-Expression Confidence: {expression_confidence:.1f}%
-
-Face Detection Confidence: {detection_confidence:.1f}%
-
-Expression Details
-------------------
-Angry: {float(emotions.get("angry", 0)):.1f}%
-Disgust: {float(emotions.get("disgust", 0)):.1f}%
-Fear: {float(emotions.get("fear", 0)):.1f}%
-Happy: {float(emotions.get("happy", 0)):.1f}%
-Sad: {float(emotions.get("sad", 0)):.1f}%
-Surprise: {float(emotions.get("surprise", 0)):.1f}%
-Neutral: {float(emotions.get("neutral", 0)):.1f}%
-
-NOTE:
-AI predictions are estimates.
-Results may vary depending on lighting,
-image quality, face angle and other factors.
-"""
-
-    st.download_button(
-        label="⬇️ Download Analysis Report",
-        data=report,
-        file_name="AI_Face_Analysis_Report.txt",
-        mime="text/plain",
-        width="stretch"
-    )
-
-    # ========================================================
-    # DISCLAIMER
-    # ========================================================
-
-    st.warning(
-        "⚠️ AI predictions are estimates. "
-        "Age, gender and expression results may vary "
-        "depending on lighting, image quality, face angle "
-        "and other factors."
-    )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
+else:
+    st.markdown("### 👋 Welcome!\nUse the camera or upload a clear face photo to start.")
 
 st.markdown(
-    """
-    <div class="footer">
-        🤖 AI Face Analysis System
-        <br>
-        <small>
-        Powered by Computer Vision & AI
-        </small>
-    </div>
-    """,
-    unsafe_allow_html=True
+    "<p style='text-align:center;color:#888;margin-top:35px;'>"
+    "🤖 AI Face Analysis System | Team Night Furry</p>",
+    unsafe_allow_html=True,
 )

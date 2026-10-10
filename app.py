@@ -1,4 +1,6 @@
 
+import hashlib
+
 import cv2
 import numpy as np
 import streamlit as st
@@ -34,8 +36,16 @@ with st.sidebar:
     st.write("⚧️ Gender-category Estimate")
     st.write("😊 Facial Expression Estimate")
     st.info(
-        "AI results are estimates. Model scores are not "
+        "AI predictions are estimates. Model scores are not "
         "real-world accuracy rates."
+    )
+
+if source_type == "📷 Camera":
+    uploaded = st.camera_input("Take a picture")
+else:
+    uploaded = st.file_uploader(
+        "Upload a clear face photo",
+        type=["jpg", "jpeg", "png"],
     )
 
 
@@ -76,16 +86,20 @@ def get_region(item, width, height):
 
     if x2 <= x1 or y2 <= y1:
         return None
+
     return x1, y1, x2, y2
 
 
 def gender_text(result):
-    raw = str(result.get("dominant_gender", "Unknown")).strip().lower()
+    raw = str(
+        result.get("dominant_gender", "Unknown")
+    ).strip().lower()
 
     if raw in ("man", "male"):
         return "Male-category estimate"
     if raw in ("woman", "female"):
         return "Female-category estimate"
+
     return "Unknown"
 
 
@@ -102,6 +116,7 @@ def score_to_percent(value):
         return None
 
     score = safe_float(value, -1)
+
     if score < 0:
         return None
 
@@ -111,16 +126,19 @@ def score_to_percent(value):
     return max(0.0, min(100.0, score))
 
 
-if source_type == "📷 Camera":
-    uploaded = st.camera_input("Take a picture")
-else:
-    uploaded = st.file_uploader(
-        "Upload a clear face photo",
-        type=["jpg", "jpeg", "png"],
-    )
-
-
 if uploaded is not None:
+    image_hash = hashlib.sha256(
+        uploaded.getvalue()
+    ).hexdigest()
+
+    # Clear old confirmations when a different image is uploaded.
+    if st.session_state.get("_active_image_hash") != image_hash:
+        st.session_state["_active_image_hash"] = image_hash
+        st.session_state["_confirmed_details"] = {}
+        st.session_state.pop("_analysis_hash", None)
+        st.session_state.pop("_analysis_results", None)
+        st.session_state.pop("_analysis_backend", None)
+
     try:
         pil_image = ImageOps.exif_transpose(
             Image.open(uploaded)
@@ -128,7 +146,8 @@ if uploaded is not None:
 
         rgb_image = np.asarray(pil_image)
         bgr_image = cv2.cvtColor(
-            rgb_image, cv2.COLOR_RGB2BGR
+            rgb_image,
+            cv2.COLOR_RGB2BGR,
         )
 
     except Exception as exc:
@@ -136,39 +155,51 @@ if uploaded is not None:
         st.exception(exc)
         st.stop()
 
-    results = None
-    selected_backend = None
+    # Reuse AI analysis when only the confirmation form changes.
+    raw_results = st.session_state.get("_analysis_results")
+    selected_backend = st.session_state.get("_analysis_backend")
     detector_errors = []
 
-    # Try stronger face detection first, with fallbacks.
-    with st.spinner("🔎 Face detect panni analyze pannudhu..."):
-        for backend in ("retinaface", "opencv", "ssd"):
-            try:
-                raw = DeepFace.analyze(
-                    img_path=bgr_image,
-                    actions=["age", "gender", "emotion"],
-                    detector_backend=backend,
-                    enforce_detection=True,
-                    align=True,
-                    silent=True,
-                )
+    if (
+        st.session_state.get("_analysis_hash") != image_hash
+        or not raw_results
+    ):
+        raw_results = None
+        selected_backend = None
 
-                candidate = normalize_results(raw)
+        with st.spinner("🔎 Face detect panni analyze pannudhu..."):
+            for backend in ("retinaface", "opencv", "ssd"):
+                try:
+                    candidate = DeepFace.analyze(
+                        img_path=bgr_image,
+                        actions=["age", "gender", "emotion"],
+                        detector_backend=backend,
+                        enforce_detection=True,
+                        align=True,
+                        silent=True,
+                    )
 
-                if candidate:
-                    results = candidate
-                    selected_backend = backend
-                    break
+                    candidate_results = normalize_results(candidate)
 
-            except Exception as exc:
-                detector_errors.append(
-                    f"{backend}: {type(exc).__name__}: {exc}"
-                )
+                    if candidate_results:
+                        raw_results = candidate_results
+                        selected_backend = backend
+                        break
 
-    if not results:
+                except Exception as exc:
+                    detector_errors.append(
+                        f"{backend}: {type(exc).__name__}: {exc}"
+                    )
+
+        if raw_results:
+            st.session_state["_analysis_hash"] = image_hash
+            st.session_state["_analysis_results"] = raw_results
+            st.session_state["_analysis_backend"] = selected_backend
+
+    if not raw_results:
         st.error(
-            "Face detect panna mudiyala da. "
-            "Clear-ah, front-facing photo try pannu."
+            "Face detect/analyze panna mudiyala da. "
+            "Clear front-facing photo try pannu."
         )
 
         with st.expander("Technical details"):
@@ -177,9 +208,9 @@ if uploaded is not None:
 
         st.stop()
 
-    # Keep only the largest face for display and results.
-    results.sort(key=face_area, reverse=True)
-    main_result = results[0]
+    # Select the largest face only.
+    raw_results.sort(key=face_area, reverse=True)
+    main_result = raw_results[0]
 
     img_h, img_w = bgr_image.shape[:2]
     region = get_region(main_result, img_w, img_h)
@@ -190,31 +221,36 @@ if uploaded is not None:
 
     x1, y1, x2, y2 = region
 
-    gender = gender_text(main_result)
-    age = estimated_age(main_result)
-    expression = str(
+    ai_gender = gender_text(main_result)
+    ai_age = estimated_age(main_result)
+    ai_expression = str(
         main_result.get("dominant_emotion", "Unknown")
     ).capitalize()
 
-    # Draw only one green box.
+    # Draw one box on the largest detected face.
     marked = bgr_image.copy()
     cv2.rectangle(
-        marked, (x1, y1), (x2, y2), (0, 255, 0), 3
+        marked,
+        (x1, y1),
+        (x2, y2),
+        (0, 255, 0),
+        3,
     )
 
     short_gender = (
-        "Male?" if gender.startswith("Male")
-        else "Female?" if gender.startswith("Female")
+        "Male?" if ai_gender.startswith("Male")
+        else "Female?" if ai_gender.startswith("Female")
         else "Unknown"
     )
 
     label = (
         f"{short_gender} | "
-        f"{age.replace(' (estimate)', '')} | "
-        f"{expression}"
+        f"{ai_age.replace(' (estimate)', '')} | "
+        f"{ai_expression}"
     )
 
     font_scale = max(0.45, min(0.72, img_w / 1400.0))
+
     (text_w, text_h), baseline = cv2.getTextSize(
         label,
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -246,22 +282,26 @@ if uploaded is not None:
 
     st.caption(
         f"Detector: {selected_backend} • "
-        f"Faces detected: {len(results)} • "
+        f"Faces detected: {len(raw_results)} • "
         "Largest face only is displayed."
     )
 
     st.subheader("🔍 Face Detection Result")
     st.image(
         cv2.cvtColor(marked, cv2.COLOR_BGR2RGB),
-        use_container_width=True,
+        width="stretch",
     )
 
-    st.subheader("📊 Analysis Result — Main Face Only")
+    # -----------------------------------------------
+    # AI PREDICTIONS
+    # -----------------------------------------------
+
+    st.subheader("🤖 AI Prediction — Main Face Only")
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Gender category (estimate)", gender)
-    col2.metric("Approximate age", age)
-    col3.metric("Expression estimate", expression)
+    col1.metric("Gender category (estimate)", ai_gender)
+    col2.metric("Approximate age", ai_age)
+    col3.metric("Expression estimate", ai_expression)
 
     face_score = score_to_percent(
         main_result.get("face_confidence")
@@ -273,7 +313,6 @@ if uploaded is not None:
             "(not prediction accuracy)."
         )
 
-    # Show scores from DeepFace without calling them accuracy.
     gender_scores = main_result.get("gender", {}) or {}
     emotion_scores = main_result.get("emotion", {}) or {}
 
@@ -293,11 +332,10 @@ if uploaded is not None:
                 if name in emotion_scores:
                     value = max(
                         0.0,
-                        min(100.0, safe_float(emotion_scores[name]))
+                        min(100.0, safe_float(emotion_scores[name])),
                     )
                     st.write(
-                        f"{name.capitalize()}: "
-                        f"{value:.1f}% model score"
+                        f"{name.capitalize()}: {value:.1f}% model score"
                     )
                     st.progress(int(round(value)))
 
@@ -311,17 +349,103 @@ if uploaded is not None:
         )
 
     st.info(
-        "Age is an estimate, not an exact age. Gender-category and "
-        "expression predictions can also be wrong, even when model "
-        "scores are high."
+        "Age, gender-category and expression are AI estimates. "
+        "Model scores are not real-world accuracy rates."
     )
+
+    # -----------------------------------------------
+    # USER-CONFIRMED DETAILS
+    # -----------------------------------------------
+
+    st.subheader("✅ Confirmed Details (Optional)")
+
+    st.caption(
+        "AI prediction mela irukkura section-la thaniya irukkum. "
+        "Unakku therinja, permission irukkura details mattum enter pannu. "
+        "Indha code confirmed details-ai database-la save pannaadhu."
+    )
+
+    with st.form(key=f"confirmed_details_form_{image_hash[:12]}"):
+        age_known = st.checkbox(
+            "Actual age enakku theriyum; confirm panna virumburen",
+            key=f"age_known_{image_hash[:12]}",
+        )
+
+        actual_age = st.number_input(
+            "Confirmed age (years)",
+            min_value=0,
+            max_value=120,
+            value=18,
+            step=1,
+            help="Age confirm panna therinja mattum checkbox select pannu.",
+            key=f"confirmed_age_{image_hash[:12]}",
+        )
+
+        confirmed_gender = st.selectbox(
+            "Confirmed gender (self-reported)",
+            [
+                "Not provided",
+                "Woman",
+                "Man",
+                "Non-binary",
+                "Another identity",
+                "Prefer not to say",
+            ],
+            key=f"confirmed_gender_{image_hash[:12]}",
+        )
+
+        confirmed_expression = st.selectbox(
+            "Person-confirmed expression description",
+            [
+                "Not provided",
+                "Happy",
+                "Sad",
+                "Angry",
+                "Neutral",
+                "Surprised",
+                "Other",
+                "Prefer not to say",
+            ],
+            key=f"confirmed_expression_{image_hash[:12]}",
+        )
+
+        save_confirmed = st.form_submit_button(
+            "Save confirmed details"
+        )
+
+    if save_confirmed:
+        confirmed = {}
+
+        if age_known:
+            confirmed["Age"] = (
+                f"{int(actual_age)} years (user-confirmed)"
+            )
+
+        if confirmed_gender != "Not provided":
+            confirmed["Gender"] = confirmed_gender
+
+        if confirmed_expression != "Not provided":
+            confirmed["Expression description"] = confirmed_expression
+
+        st.session_state["_confirmed_details"] = confirmed
+
+    confirmed = st.session_state.get("_confirmed_details", {})
+
+    if confirmed:
+        st.markdown(
+            "### ✅ Confirmed Details — Separate from AI Predictions"
+        )
+
+        for field, value in confirmed.items():
+            st.write(f"**{field}:** {value}")
+    else:
+        st.caption("Innum confirmed details enter pannala.")
 
 else:
     st.markdown(
         "### 👋 Welcome!\n"
         "Use the camera or upload a clear face photo to start."
     )
-
 
 st.markdown(
     "<p style='text-align:center;color:#888;margin-top:35px;'>"

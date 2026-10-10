@@ -162,8 +162,8 @@ MODEL_MEAN_VALUES = (
 
 def safe_float(value, default=0.0):
     try:
-        result = float(value)
-        return result if np.isfinite(result) else default
+        number = float(value)
+        return number if np.isfinite(number) else default
     except (TypeError, ValueError):
         return default
 
@@ -275,7 +275,7 @@ def load_models():
 
 
 # ============================================================
-# OPENCV FALLBACK FACE DETECTOR
+# OPENCV FACE DETECTOR
 # ============================================================
 
 def detect_faces_opencv(frame, face_net, threshold=0.50):
@@ -366,8 +366,12 @@ def detect_faces(frame, face_net):
 
             x = int(safe_float(area.get("x", 0)))
             y = int(safe_float(area.get("y", 0)))
-            w = int(safe_float(area.get("w", area.get("width", 0))))
-            h = int(safe_float(area.get("h", area.get("height", 0))))
+            w = int(safe_float(
+                area.get("w", area.get("width", 0))
+            ))
+            h = int(safe_float(
+                area.get("h", area.get("height", 0))
+            ))
 
             x1 = max(0, min(width - 1, x))
             y1 = max(0, min(height - 1, y))
@@ -398,7 +402,6 @@ def detect_faces(frame, face_net):
     except Exception as exc:
         retina_error = str(exc)
 
-    # If RetinaFace fails, try OpenCV's detector.
     try:
         faces = detect_faces_opencv(frame, face_net)
 
@@ -415,32 +418,70 @@ def detect_faces(frame, face_net):
 
 
 # ============================================================
-# FACE CROPPING
+# IMPORTANT FIX: SQUARE FACE CROP WITH PADDING
 # ============================================================
 
-def padded_crop(
+def square_face_crop(
     frame,
     x1,
     y1,
     x2,
     y2,
-    padding_ratio=0.10,
+    padding_ratio=0.15,
 ):
 
     height, width = frame.shape[:2]
 
-    padding_x = int((x2 - x1) * padding_ratio)
-    padding_y = int((y2 - y1) * padding_ratio)
+    face_width = x2 - x1
+    face_height = y2 - y1
 
-    left = max(0, x1 - padding_x)
-    top = max(0, y1 - padding_y)
-    right = min(width, x2 + padding_x)
-    bottom = min(height, y2 + padding_y)
+    if face_width <= 0 or face_height <= 0:
+        raise ValueError("Invalid face bounding box.")
 
-    crop = frame[top:bottom, left:right].copy()
+    # Make a square crop and leave context around the face.
+    side = max(
+        32,
+        int(max(face_width, face_height)
+            * (1.0 + 2.0 * padding_ratio)),
+    )
+
+    center_x = (x1 + x2) // 2
+    center_y = (y1 + y2) // 2
+
+    left = center_x - side // 2
+    top = center_y - side // 2
+    right = left + side
+    bottom = top + side
+
+    crop_left = max(0, left)
+    crop_top = max(0, top)
+    crop_right = min(width, right)
+    crop_bottom = min(height, bottom)
+
+    crop = frame[
+        crop_top:crop_bottom,
+        crop_left:crop_right,
+    ]
 
     if crop.size == 0:
         raise ValueError("The face crop is empty.")
+
+    # If the face touches the image border, replicate edge pixels
+    # so that the final crop remains square rather than distorted.
+    pad_top = max(0, -top)
+    pad_left = max(0, -left)
+    pad_bottom = max(0, bottom - height)
+    pad_right = max(0, right - width)
+
+    if any((pad_top, pad_bottom, pad_left, pad_right)):
+        crop = cv2.copyMakeBorder(
+            crop,
+            pad_top,
+            pad_bottom,
+            pad_left,
+            pad_right,
+            cv2.BORDER_REPLICATE,
+        )
 
     return crop
 
@@ -454,6 +495,8 @@ def predict_age_gender(face, age_net, gender_net):
     if face is None or face.size == 0:
         return "Unknown", 0.0, "Unavailable", 0.0
 
+    # The face crop is square, with padding around it.
+    # Input remains BGR for the pretrained OpenCV Caffe models.
     blob = cv2.dnn.blobFromImage(
         face,
         1.0,
@@ -470,7 +513,7 @@ def predict_age_gender(face, age_net, gender_net):
     gender = GENDER_LIST[gender_index]
 
     gender_score = float(
-        gender_scores[gender_index] * 100
+        gender_scores[gender_index] * 100.0
     )
 
     age_net.setInput(blob)
@@ -480,7 +523,7 @@ def predict_age_gender(face, age_net, gender_net):
     age_range = AGE_LIST[age_index]
 
     age_score = float(
-        age_scores[age_index] * 100
+        age_scores[age_index] * 100.0
     )
 
     return gender, gender_score, age_range, age_score
@@ -593,6 +636,7 @@ if source is not None:
         ).convert("RGB")
 
         rgb_image = np.asarray(pil_image)
+
         frame = cv2.cvtColor(
             rgb_image,
             cv2.COLOR_RGB2BGR,
@@ -626,12 +670,11 @@ if source is not None:
 
     if not faces:
         st.warning(
-            "No clear face detected. Please try a well-lit, "
-            "front-facing photo."
+            "No clear face detected. Use a well-lit, front-facing photo."
         )
         st.stop()
 
-    # Select and analyze only the largest detected face.
+    # Select the largest face only.
     selected_face = faces[0]
 
     x1 = selected_face["x"]
@@ -640,11 +683,18 @@ if source is not None:
     y2 = selected_face["y2"]
 
     try:
-        # Tight crop is used for age and gender estimates.
-        age_gender_crop = frame[y1:y2, x1:x2].copy()
+        # FIX: Use a padded square crop for age and gender too.
+        age_gender_crop = square_face_crop(
+            frame,
+            x1,
+            y1,
+            x2,
+            y2,
+            padding_ratio=0.15,
+        )
 
-        # Slightly padded crop is used for expression analysis.
-        expression_crop = padded_crop(
+        # Expression uses a slightly smaller margin.
+        expression_crop = square_face_crop(
             frame,
             x1,
             y1,
@@ -652,9 +702,6 @@ if source is not None:
             y2,
             padding_ratio=0.10,
         )
-
-        if age_gender_crop.size == 0:
-            raise ValueError("Face crop is empty.")
 
         with st.spinner("👤 Estimating age and gender..."):
             (
@@ -754,10 +801,7 @@ if source is not None:
     )
 
     st.image(
-        cv2.cvtColor(
-            result_frame,
-            cv2.COLOR_BGR2RGB,
-        ),
+        cv2.cvtColor(result_frame, cv2.COLOR_BGR2RGB),
         width="stretch",
     )
 
@@ -831,9 +875,7 @@ if source is not None:
             unsafe_allow_html=True,
         )
         st.write(f"**👤 Gender:** {gender_score:.1f}% model score")
-        st.progress(
-            min(max(gender_score / 100.0, 0.0), 1.0)
-        )
+        st.progress(min(max(gender_score / 100.0, 0.0), 1.0))
         st.markdown("</div>", unsafe_allow_html=True)
 
     with col2:
@@ -842,9 +884,7 @@ if source is not None:
             unsafe_allow_html=True,
         )
         st.write(f"**🎂 Age:** {age_score:.1f}% model score")
-        st.progress(
-            min(max(age_score / 100.0, 0.0), 1.0)
-        )
+        st.progress(min(max(age_score / 100.0, 0.0), 1.0))
         st.markdown("</div>", unsafe_allow_html=True)
 
     with col3:
@@ -853,9 +893,7 @@ if source is not None:
             unsafe_allow_html=True,
         )
         st.write(f"**😊 Expression:** {expression_score:.1f}% model score")
-        st.progress(
-            min(max(expression_score / 100.0, 0.0), 1.0)
-        )
+        st.progress(min(max(expression_score / 100.0, 0.0), 1.0))
         st.markdown("</div>", unsafe_allow_html=True)
 
     detector_score = safe_float(
@@ -871,7 +909,7 @@ if source is not None:
     )
 
     # ========================================================
-    # SHOW MODEL INPUT CROPS
+    # SHOW ACTUAL MODEL INPUT CROPS
     # ========================================================
 
     with st.expander("View face crops sent to models"):
@@ -879,7 +917,7 @@ if source is not None:
         crop_col1, crop_col2 = st.columns(2)
 
         with crop_col1:
-            st.caption("Age and gender input")
+            st.caption("Age/Gender model input — square crop")
             st.image(
                 cv2.cvtColor(
                     age_gender_crop,
@@ -889,7 +927,7 @@ if source is not None:
             )
 
         with crop_col2:
-            st.caption("Expression input")
+            st.caption("Expression model input")
             st.image(
                 cv2.cvtColor(
                     expression_crop,
@@ -981,7 +1019,7 @@ Face Detection Score: {detector_score:.1f}%
 NOTE:
 AI predictions are estimates, not verified facts.
 Model scores are not real-world accuracy rates.
-The age model provides broad age ranges, not exact age.
+The age model produces broad age ranges, not exact age.
 """
 
     st.download_button(
@@ -993,10 +1031,11 @@ The age model provides broad age ranges, not exact age.
     )
 
     st.warning(
-        "AI predictions are estimates. Age is shown as a broad range, "
-        "not exact age. Gender-category and expression predictions can "
-        "also be wrong, even when model scores are high."
+        "Age, gender-category and expression predictions can be wrong. "
+        "High model scores do not guarantee correct results. "
+        "This age model provides broad age ranges, not exact age."
     )
+
 
 # ============================================================
 # FOOTER
@@ -1006,7 +1045,7 @@ st.markdown(
     """
     <div class="footer">
         🤖 AI Face Analysis System<br>
-        <small>Powered by Computer Vision &amp; AI | Team Night Furry</small>
+        <small>Powered by Computer Vision &amp; AI</small>
     </div>
     """,
     unsafe_allow_html=True,

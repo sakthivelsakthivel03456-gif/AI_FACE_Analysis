@@ -9,8 +9,8 @@ from deepface import DeepFace
 
 # =====================================================
 # AI FACE ANALYSIS - TEAM NIGHT FURRY
-# OpenCV: face, age and gender-category estimates
-# DeepFace: facial-expression estimate only
+# OpenCV: face detection, age and gender-category estimates
+# DeepFace: expression estimate
 # =====================================================
 
 st.set_page_config(
@@ -78,7 +78,7 @@ def download_model(filename, url):
     temp_path = path + ".download"
 
     try:
-        with st.spinner(f"Preparing model: {filename}"):
+        with st.spinner(f"Preparing model: {filename}..."):
             urllib.request.urlretrieve(url, temp_path)
 
         if os.path.getsize(temp_path) <= 1000:
@@ -203,7 +203,7 @@ def detect_faces(frame, face_net, threshold=0.50):
                 "confidence": confidence,
             })
 
-    # Largest face first
+    # Largest face first. Only the largest is analyzed later.
     faces.sort(
         key=lambda face:
             (face["x2"] - face["x1"])
@@ -215,7 +215,7 @@ def detect_faces(frame, face_net, threshold=0.50):
 
 
 # =====================================================
-# SQUARE FACE CROP WITH PADDING
+# PADDED SQUARE CROP FOR EXPRESSION ANALYSIS
 # =====================================================
 
 def square_face_crop(
@@ -233,8 +233,10 @@ def square_face_crop(
 
     side = max(
         32,
-        int(max(face_width, face_height)
-            * (1.0 + 2.0 * padding_ratio)),
+        int(
+            max(face_width, face_height)
+            * (1.0 + 2.0 * padding_ratio)
+        ),
     )
 
     center_x = (x1 + x2) // 2
@@ -256,7 +258,7 @@ def square_face_crop(
     ]
 
     if crop.size == 0:
-        return frame[y1:y2, x1:x2]
+        return frame[y1:y2, x1:x2].copy()
 
     pad_top = max(0, -top)
     pad_left = max(0, -left)
@@ -284,6 +286,7 @@ def predict_age_gender(face, age_net, gender_net):
     if face is None or face.size == 0:
         return "Unknown", 0.0, "Unavailable", 0.0
 
+    # Use the tight, detected face crop for these Caffe models.
     blob = cv2.dnn.blobFromImage(
         face,
         1.0,
@@ -360,7 +363,7 @@ def predict_emotion(face):
 
 
 # =====================================================
-# MAIN USER INTERFACE
+# APPLICATION UI
 # =====================================================
 
 st.markdown(
@@ -391,8 +394,8 @@ with st.sidebar:
     st.write("😊 Facial Expression Estimate")
 
     st.info(
-        "Predictions are estimates. Model scores are not "
-        "real-world accuracy rates."
+        "AI results are estimates. Model scores do not represent "
+        "real-world prediction accuracy."
     )
 
 
@@ -406,32 +409,26 @@ else:
 
 
 # =====================================================
-# ANALYZE ONLY THE LARGEST FACE
+# PROCESS IMAGE AND ANALYZE ONE FACE
 # =====================================================
 
 if source is not None:
-
-    image_bytes = np.frombuffer(
+    image_array = np.frombuffer(
         source.getvalue(),
         dtype=np.uint8,
     )
 
     frame = cv2.imdecode(
-        image_bytes,
+        image_array,
         cv2.IMREAD_COLOR,
     )
 
     if frame is None:
-        st.error(
-            "Image read panna mudiyala da. "
-            "JPG/PNG photo try pannu."
-        )
+        st.error("Image read panna mudiyala da. JPG/PNG try pannu.")
         st.stop()
 
     try:
-        with st.spinner(
-            "Loading face, age and gender models..."
-        ):
+        with st.spinner("Loading face, age and gender models..."):
             face_net, age_net, gender_net = load_models()
 
     except Exception as exc:
@@ -449,15 +446,23 @@ if source is not None:
         )
         st.stop()
 
-    # Only the largest detected face is selected.
-    face_info = faces[0]
+    # Select the largest face only.
+    selected_face = faces[0]
 
-    x1 = face_info["x1"]
-    y1 = face_info["y1"]
-    x2 = face_info["x2"]
-    y2 = face_info["y2"]
+    x1 = selected_face["x1"]
+    y1 = selected_face["y1"]
+    x2 = selected_face["x2"]
+    y2 = selected_face["y2"]
 
-    face_crop = square_face_crop(
+    # Tight crop for age/gender estimation.
+    age_gender_crop = frame[y1:y2, x1:x2].copy()
+
+    if age_gender_crop.size == 0:
+        st.error("Face crop empty-ah irukku da. Vera photo try pannu.")
+        st.stop()
+
+    # Padded crop for expression estimation.
+    emotion_crop = square_face_crop(
         frame,
         x1,
         y1,
@@ -472,16 +477,16 @@ if source is not None:
             age_range,
             age_score,
         ) = predict_age_gender(
-            face_crop,
+            age_gender_crop,
             age_net,
             gender_net,
         )
 
-        expression, expression_score, emotions = (
-            predict_emotion(face_crop)
+        expression, expression_score, emotions = predict_emotion(
+            emotion_crop
         )
 
-    # Draw one box only.
+    # Draw one rectangle only.
     marked = frame.copy()
 
     cv2.rectangle(
@@ -493,6 +498,7 @@ if source is not None:
     )
 
     gender_short = gender.split("-")[0]
+
     label = (
         f"{gender_short} | Age {age_range} | "
         f"{expression.capitalize()}"
@@ -516,7 +522,10 @@ if source is not None:
         marked,
         (x1, text_y - text_height - 8),
         (
-            min(frame.shape[1] - 1, x1 + text_width + 10),
+            min(
+                frame.shape[1] - 1,
+                x1 + text_width + 10,
+            ),
             text_y + baseline,
         ),
         (10, 18, 32),
@@ -534,6 +543,7 @@ if source is not None:
         cv2.LINE_AA,
     )
 
+    # Show marked image.
     st.subheader("🔍 Face Detection Result")
 
     st.image(
@@ -543,11 +553,11 @@ if source is not None:
 
     st.caption(
         f"Faces detected: {len(faces)}. "
-        "The largest detected face is analyzed."
+        "Only the largest detected face is analyzed."
     )
 
     # -------------------------------------------------
-    # ANALYSIS RESULTS
+    # ANALYSIS RESULT
     # -------------------------------------------------
 
     st.subheader("📊 Analysis Result — Main Face Only")
@@ -573,7 +583,7 @@ if source is not None:
     # MODEL SCORES
     # -------------------------------------------------
 
-    st.subheader("Model scores — not accuracy")
+    st.subheader("Model scores (not accuracy)")
 
     col1, col2, col3 = st.columns(3)
 
@@ -594,18 +604,41 @@ if source is not None:
 
     st.caption(
         f"Face detector score: "
-        f"{face_info['confidence'] * 100:.1f}% "
+        f"{selected_face['confidence'] * 100:.1f}% "
         "(not prediction accuracy)."
     )
 
-    with st.expander("View crop sent to analysis models"):
-        st.image(
-            cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB),
-            width=220,
-        )
+    # -------------------------------------------------
+    # DEBUG CROPS
+    # -------------------------------------------------
+
+    with st.expander("View crops sent to the models"):
+        crop_col1, crop_col2 = st.columns(2)
+
+        with crop_col1:
+            st.caption("Age/Gender model input (tight crop)")
+
+            st.image(
+                cv2.cvtColor(
+                    age_gender_crop,
+                    cv2.COLOR_BGR2RGB,
+                ),
+                width=220,
+            )
+
+        with crop_col2:
+            st.caption("Expression model input (padded crop)")
+
+            st.image(
+                cv2.cvtColor(
+                    emotion_crop,
+                    cv2.COLOR_BGR2RGB,
+                ),
+                width=220,
+            )
 
     # -------------------------------------------------
-    # EXPRESSION DETAILS
+    # EXPRESSION SCORES
     # -------------------------------------------------
 
     if emotions and "analysis_error" not in emotions:
@@ -642,7 +675,6 @@ if source is not None:
         )
 
     st.info(
-        "This app analyzes only the largest detected face. "
         "Age, gender-category and expression are AI estimates "
         "and may be incorrect. Model scores are not real-world "
         "accuracy rates."
